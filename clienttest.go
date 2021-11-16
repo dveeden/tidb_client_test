@@ -153,7 +153,7 @@ func (cts *ClientTestSuite) testClient(client string) (okCount int, failCount in
 }
 
 func main() {
-	flag.BoolVar(&verboseFlag, "v", false, "Verbose")
+	flag.BoolVar(&verboseFlag, "verbose", false, "Verbose")
 	flag.Parse()
 	fmt.Println("TiDB Client Test")
 
