@@ -17,6 +17,7 @@ import (
 )
 
 var verboseFlag bool
+var version string
 
 type ClientCredential struct {
 	user       string
@@ -45,13 +46,19 @@ func NewClientTestSuite() *ClientTestSuite {
 	return &cts
 }
 
-func (cts *ClientTestSuite) getClients() ([]string, error) {
+func (cts *ClientTestSuite) getClients(version string) ([]string, error) {
 	user, err := user.Current()
 	if err != nil {
 		return nil, err
 	}
 
-	clients, err := filepath.Glob(user.HomeDir + "/opt/mysql/*/bin/mysql")
+	var clients []string
+	if version != "all" {
+		clients, err = filepath.Glob(user.HomeDir + "/opt/mysql/" + version + "/bin/mysql")
+	} else {
+		clients, err = filepath.Glob(user.HomeDir + "/opt/mysql/*/bin/mysql")
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -100,9 +107,18 @@ func (cts *ClientTestSuite) testClient(client string) (okCount int, failCount in
 				expectFailure = true
 			}
 
-			// MySQL 5.1.x doesn't support authentication plugins
 			if user.authPlugin != "mysql_native_password" {
+				// MySQL 5.1.x doesn't support authentication plugins
 				if clientVer.LessThan(*semver.New("5.1.99")) {
+					expectFailure = true
+				}
+
+				// MySQL 5.5 and 5.6 don't ship a caching_sha2_password client plugin
+				//
+				//     ERROR 2059 (HY000): Authentication plugin 'caching_sha2_password' cannot be loaded:
+				//     /usr/local/mysql/lib/plugin/caching_sha2_password.so: cannot open shared object file:
+				//     No such file or directory
+				if clientVer.LessThan(*semver.New("5.7.0")) {
 					expectFailure = true
 				}
 			}
@@ -132,10 +148,15 @@ func (cts *ClientTestSuite) testClient(client string) (okCount int, failCount in
 					fmt.Printf("  Command '%s' returned %d.\n", cmd.String(), cmd.ProcessState.ExitCode())
 					println(string(output))
 				}
-				if user.authPlugin == "caching_sha2_password" && !strings.Contains(string(output),
-					"ERROR 1251 (08004): Client does not support authentication protocol requested by server; consider upgrading MySQL client") {
-					fmt.Printf("Unexpected output:\n")
-					println(string(output))
+				if user.authPlugin == "caching_sha2_password" {
+					if strings.Contains(string(output),
+						"ERROR 1251 (08004): Client does not support authentication protocol requested by server; consider upgrading MySQL client") {
+					} else if strings.Contains(string(output),
+						"ERROR 2059 (HY000): Authentication plugin 'caching_sha2_password' cannot be loaded") {
+					} else {
+						fmt.Printf("Unexpected output:\n")
+						println(string(output))
+					}
 				}
 				okCount++
 			} else {
@@ -154,6 +175,7 @@ func (cts *ClientTestSuite) testClient(client string) (okCount int, failCount in
 
 func main() {
 	flag.BoolVar(&verboseFlag, "verbose", false, "Verbose")
+	flag.StringVar(&version, "version", "all", "Version to test")
 	flag.Parse()
 	fmt.Println("TiDB Client Test")
 
@@ -177,7 +199,7 @@ func main() {
 		panic(err)
 	}
 
-	clients, err := cts.getClients()
+	clients, err := cts.getClients(version)
 	if err != nil {
 		panic(err)
 	}
