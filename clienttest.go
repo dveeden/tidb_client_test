@@ -19,34 +19,48 @@ import (
 var verboseFlag bool
 var version string
 
-type ClientCredential struct {
+type clientCredential struct {
 	user       string
 	host       string
 	password   string
 	authPlugin string
 }
 
-type ClientTestSuite struct {
-	users []ClientCredential
+type clientTestSuite struct {
+	users []clientCredential
 }
 
-func NewClientTestSuite() *ClientTestSuite {
+type clientTestResults struct {
+	okCount     int
+	failCount   int
+	testResults []clientTestResult
+}
+
+type clientTestResult struct {
+	user          clientCredential
+	client        string
+	expectFailure bool
+	success       bool
+	connection    string
+}
+
+func NewClientTestSuite() *clientTestSuite {
 	user, err := user.Current()
 	if err != nil {
 		panic(err)
 	}
 
-	cts := ClientTestSuite{}
-	cts.users = []ClientCredential{
+	cts := clientTestSuite{}
+	cts.users = []clientCredential{
 		{"nopw", "%", "", "mysql_native_password"},
-		{"nat", "%", "nat", "mysql_native_password"},
-		{"sha", "%", "sha", "caching_sha2_password"},
-		{"sock", "%", user.Username, "auth_socket"},
+		{"native", "%", "nat", "mysql_native_password"},
+		{"sha2", "%", "sha", "caching_sha2_password"},
+		{"socket", "%", user.Username, "auth_socket"},
 	}
 	return &cts
 }
 
-func (cts *ClientTestSuite) getClients(version string) ([]string, error) {
+func (cts *clientTestSuite) getClients(version string) ([]string, error) {
 	user, err := user.Current()
 	if err != nil {
 		return nil, err
@@ -66,7 +80,7 @@ func (cts *ClientTestSuite) getClients(version string) ([]string, error) {
 	return clients, nil
 }
 
-func (cts *ClientTestSuite) setupUsers(db *sql.DB) error {
+func (cts *clientTestSuite) setupUsers(db *sql.DB) error {
 	for _, user := range cts.users {
 		_, err := db.Exec("DROP USER IF EXISTS '" + user.user + "'@'" + user.host + "'")
 		if err != nil {
@@ -90,16 +104,27 @@ func (cts *ClientTestSuite) setupUsers(db *sql.DB) error {
 	return nil
 }
 
-func (cts *ClientTestSuite) testClient(client string) (okCount int, failCount int, err error) {
+func (cts *clientTestSuite) testClient(client string) (clientTestResults, error) {
+	var report clientTestResults
 	connOpts := [][]string{
-		[]string{"-h", "127.0.0.1", "-P", "4000"},
-		[]string{"-S", "/tmp/tidb.sock"},
+		{"-h", "127.0.0.1", "-P", "4000"},
+		{"-S", "/tmp/tidb.sock"},
 	}
 	parts := strings.Split(client, "/")
 	clientVer := semver.New(parts[len(parts)-3])
 
 	for _, user := range cts.users {
 		for _, connOpt := range connOpts {
+			testResult := clientTestResult{
+				user:       user,
+				client:     client,
+				success:    false,
+				connection: "TCP",
+			}
+			if connOpt[0] == "-S" {
+				testResult.connection = "socket"
+			}
+
 			expectFailure := false
 
 			// auth_socket requires a socket connection to function
@@ -107,21 +132,20 @@ func (cts *ClientTestSuite) testClient(client string) (okCount int, failCount in
 				expectFailure = true
 			}
 
-			if user.authPlugin != "mysql_native_password" {
-				// MySQL 5.1.x doesn't support authentication plugins
-				if clientVer.LessThan(*semver.New("5.1.99")) {
-					expectFailure = true
-				}
-
-				// MySQL 5.5 and 5.6 don't ship a caching_sha2_password client plugin
-				//
-				//     ERROR 2059 (HY000): Authentication plugin 'caching_sha2_password' cannot be loaded:
-				//     /usr/local/mysql/lib/plugin/caching_sha2_password.so: cannot open shared object file:
-				//     No such file or directory
-				if clientVer.LessThan(*semver.New("5.7.0")) {
-					expectFailure = true
-				}
+			// MySQL 5.1.x doesn't support authentication plugins
+			if user.authPlugin != "mysql_native_password" && clientVer.LessThan(*semver.New("5.1.99")) {
+				expectFailure = true
 			}
+
+			// MySQL 5.5 and 5.6 don't ship a caching_sha2_password client plugin
+			//
+			//     ERROR 2059 (HY000): Authentication plugin 'caching_sha2_password' cannot be loaded:
+			//     /usr/local/mysql/lib/plugin/caching_sha2_password.so: cannot open shared object file:
+			//     No such file or directory
+			if user.authPlugin == "caching_sha2_password" && clientVer.LessThan(*semver.New("5.7.0")) {
+				expectFailure = true
+			}
+			testResult.expectFailure = expectFailure
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
@@ -141,7 +165,8 @@ func (cts *ClientTestSuite) testClient(client string) (okCount int, failCount in
 					fmt.Printf("\U00002705\t")
 					fmt.Printf("  Command '%s' returned %d.\n", cmd.String(), cmd.ProcessState.ExitCode())
 				}
-				okCount++
+				report.okCount++
+				testResult.success = true
 			} else if exitCode != 0 && expectFailure {
 				if verboseFlag {
 					fmt.Printf("\U00002714\U0000FE0F\t")
@@ -158,19 +183,67 @@ func (cts *ClientTestSuite) testClient(client string) (okCount int, failCount in
 						println(string(output))
 					}
 				}
-				okCount++
+				report.okCount++
 			} else {
 				fmt.Printf("\U0000274C\t")
 				fmt.Printf("  Command '%s' returned %d.\n", cmd.String(), cmd.ProcessState.ExitCode())
 				println(string(output))
-				failCount++
+				report.failCount++
 			}
+			report.testResults = append(report.testResults, testResult)
 		}
 	}
 
-	fmt.Printf("Testing %s: success=%d, failures=%d\n", client, okCount, failCount)
+	if verboseFlag {
+		fmt.Printf("Testing %s: success=%d, failures=%d\n", client, report.okCount, report.failCount)
+	}
 
-	return okCount, failCount, nil
+	return report, nil
+}
+
+func printResults(authMethod string, clients []string, r map[string][]clientTestResult) {
+	fmt.Printf("Test results for test with %s as default authentication format\n", authMethod)
+	for _, client := range clients[:1] {
+		fmt.Printf("%-8s", "auth")
+		for _, test := range r[client] {
+			switch test.user.authPlugin {
+			case "mysql_native_password":
+				fmt.Print("\tnative")
+			case "caching_sha2_password":
+				fmt.Print("\tsha2")
+			case "auth_socket":
+				fmt.Print("\tsocket")
+			}
+		}
+		fmt.Print("\n")
+
+		fmt.Printf("%-8s", "user")
+		for _, test := range r[client] {
+			fmt.Printf("\t%s", test.user.user)
+		}
+		fmt.Print("\n")
+
+		fmt.Printf("%-8s", "connection")
+		for _, test := range r[client] {
+			fmt.Printf("\t%s", test.connection)
+		}
+		fmt.Print("\n")
+	}
+	for _, client := range clients {
+		clientName := strings.Split(client, "/")
+		fmt.Printf("%-8s", clientName[len(clientName)-3])
+		for _, test := range r[client] {
+			if test.success && !test.expectFailure {
+				fmt.Print("\t\U00002705")
+			} else if !test.success && test.expectFailure {
+				fmt.Print("\t\U00002714\U0000FE0F")
+			} else {
+				fmt.Print("\t\U0000274C")
+			}
+		}
+		fmt.Print("\n")
+
+	}
 }
 
 func main() {
@@ -208,25 +281,30 @@ func main() {
 	for _, client := range clients {
 		fmt.Printf("\t%s\n", client)
 	}
-	fmt.Printf("-----------------------------------------------\n")
 
 	exitCode := 0
 	authMethods := []string{"mysql_native_password", "caching_sha2_password"}
 	for _, authMethod := range authMethods {
-		fmt.Printf("Testing with %s as default authentication plugin\n", authMethod)
+		clientResults := make(map[string][]clientTestResult)
+		fmt.Printf("-----------------------------------------------\n")
+		if verboseFlag {
+			fmt.Printf("Testing with %s as default authentication plugin\n\n", authMethod)
+		}
 		_, err = dbAdmin.Exec("SET GLOBAL default_authentication_plugin='" + authMethod + "'")
 		if err != nil {
 			panic(err)
 		}
 		for _, client := range clients {
-			_, failCount, err := cts.testClient(client)
+			report, err := cts.testClient(client)
+			clientResults[client] = report.testResults
 			if err != nil {
 				panic(err)
 			}
-			if failCount > 0 {
+			if report.failCount > 0 {
 				exitCode = 1
 			}
 		}
+		printResults(authMethod, clients, clientResults)
 	}
 
 	defer dbAdmin.Close()
