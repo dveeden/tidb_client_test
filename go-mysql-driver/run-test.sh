@@ -9,7 +9,7 @@ do
   do
     go mod edit -require github.com/go-sql-driver/mysql@v${v}
     go mod download github.com/go-sql-driver/mysql
-    go build && ./go-mysql-driver
+    go build && ./go-mysql-driver $*
   done
 
 done

@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"flag"
 	"fmt"
 	"runtime/debug"
 
@@ -9,6 +10,9 @@ import (
 )
 
 func main() {
+	host := flag.String("host", "127.0.0.1", "database host")
+	port := flag.Int("port", 4000, "database port")
+	flag.Parse()
 	v, ok := debug.ReadBuildInfo()
 	if ok {
 		for _, m := range v.Deps {
@@ -17,25 +21,28 @@ func main() {
 	}
 
 	dsns := []string{
-		"root@tcp(127.0.0.1:4000)/test",
-		"nopw@tcp(127.0.0.1:4000)/",
-		"native:nat@tcp(127.0.0.1:4000)/",
+		fmt.Sprintf("root@tcp(%s:%d)/test?timeout=10s", *host, *port),
+		fmt.Sprintf("nopw@tcp(%s:%d)/", *host, *port),
+		fmt.Sprintf("native:nat@tcp(%s:%d)/", *host, *port),
 		"native:nat@unix(/tmp/tidb.sock)/",
-		"sha2:sha@tcp(127.0.0.1:4000)/?tls=skip-verify",
+		fmt.Sprintf("sha2:sha@tcp(%s:%d)/?tls=skip-verify", *host, *port),
 	}
 	for _, dsn := range dsns {
 		print(dsn, "\t")
+
 		db, err := sql.Open("mysql", dsn)
 		if err != nil {
 			fmt.Printf("Connect error: %s\n", err)
 			continue
 		}
+		defer db.Close()
+
 		err = db.Ping()
 		if err != nil {
 			fmt.Printf("Ping error: %s\n", err)
 			continue
 		}
-		db.Close()
+
 		println("OK")
 	}
 	print("\n")
